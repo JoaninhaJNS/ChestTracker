@@ -220,9 +220,8 @@ public class Extension : GEarthExtension
     private void HandleObjectDataUpdate(Intercept e)
     {
         FloorItemDataUpdatedMsg? item = e.Packet.Read<FloorItemDataUpdatedMsg>();
-        if (item.Data is not MapData map) return;
-
         if (!AllChestIds.Contains(item.Id)) return;
+        if (item.Data is not MapData map) return;
 
         map.TryGetValue("everyone_can_open", out string? isOpen);
 
@@ -324,7 +323,7 @@ public class Extension : GEarthExtension
                 : "";
             string action = diff > 0 ? "Added" : "Removed";
             ext.Send(In.NotificationDialog, "wired.error", 2,
-                "message", $"[Chest {chestId}]\n\n{action}: [{Math.Abs(diff)}]\n\n{name}",
+                "message", $"[Chest {chestId}]\n\n{action} [{Math.Abs(diff)}]\n\n{name}",
                 "image", image);
         }
 
@@ -339,7 +338,7 @@ public class Extension : GEarthExtension
                 ? $"https://images.habbo.com/dcr/hof_furni/{info.Revision}/{info.Identifier}_icon.png"
                 : "";
             ext.Send(In.NotificationDialog, "wired.error", 2,
-                "message", $"[Chest {chestId}]\n\nRemoved: [{oldQty}]\n\n{name}",
+                "message", $"[Chest {chestId}]\n\nRemoved [{oldQty}]\n\n{name}",
                 "image", image);
         }
 
