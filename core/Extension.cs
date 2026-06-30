@@ -1,5 +1,7 @@
 ﻿using Xabbo;
 using Xabbo.Core;
+using Xabbo.Core.Events;
+using Xabbo.Core.Game;
 using Xabbo.Core.GameData;
 using Xabbo.Core.Messages.Incoming;
 using Xabbo.GEarth;
@@ -12,6 +14,7 @@ public class Extension : GEarthExtension
 {
     private readonly Extension ext;
     private readonly GameDataManager GameData = new();
+    private readonly RoomManager RoomManager;
     private FurniData? FurniData = null;
     private FurniInfo? StarterChest = null;
     private FurniInfo? NormalChest1 = null;
@@ -28,6 +31,11 @@ public class Extension : GEarthExtension
     private readonly Dictionary<int, Dictionary<(bool, int), int>> PendingChunks = [];
     private readonly SemaphoreSlim Throttle = new(1, 1);
     private DateTimeOffset LastSend = DateTimeOffset.MinValue;
+    private string? CurrentRoomName = null;
+    private long CurrentRoomId = 0;
+    private int RoomVisitId = 0;
+    private string CurrentRoomEntryTimestamp = "";
+    private readonly List<string> Logs = [];
 
     public Extension() : base(new GEarthOptions
     {
@@ -38,6 +46,7 @@ public class Extension : GEarthExtension
     })
     {
         ext = this;
+        RoomManager = new RoomManager(ext);
     }
 
     private FurniInfo? GetFurniInfo(bool isWall, int kind)
@@ -47,6 +56,14 @@ public class Extension : GEarthExtension
             return info;
         return null;
     }
+
+    private void Log(string message)
+    {
+        string timestamp = DateTime.Now.ToString("HH:mm:ss");
+        string roomLabel = $"{CurrentRoomName ?? "Unknown"} ({CurrentRoomId})";
+        Logs.Add($"{RoomVisitId}\0{roomLabel}\0{CurrentRoomEntryTimestamp}\0[{timestamp}] {message}");
+    }
+
     private void Reset()
     {
         AllChestIds.Clear();
@@ -77,13 +94,38 @@ public class Extension : GEarthExtension
         CreditsChest2 = GetClass("wf_storage_coins2");
 
         Intercepted += ProcessPackets;
+        ext.RoomManager.Entered += OnEnteredRoom;
     }
 
     protected override void OnDisconnected()
     {
         base.OnDisconnected();
         Reset();
+        Logs.Clear();
         Intercepted -= ProcessPackets;
+        ext.RoomManager.Entered -= OnEnteredRoom;
+    }
+
+    private void OnEnteredRoom(RoomEventArgs e)
+    {
+        IRoom? RoomInstance = e.Room;
+        if (RoomInstance is null)
+        {
+            Console.WriteLine("Room instance returned null");
+            return;
+        }
+
+        IRoomData? RoomData = RoomInstance.Data;
+        if (RoomData is null)
+        {
+            Console.WriteLine("RoomData returned null");
+            return;
+        }
+
+        CurrentRoomName = RoomData.Name;
+        CurrentRoomId = RoomInstance.Id;
+        CurrentRoomEntryTimestamp = DateTime.Now.ToString("HH:mm:ss");
+        RoomVisitId++;
     }
 
     private void HandleRoomReady(Intercept _) => Reset();
@@ -121,8 +163,58 @@ public class Extension : GEarthExtension
                 HandleRoomReady(e);
                 return;
             }
+
+            if (e.Is([Out.Chat, Out.Shout]))
+            {
+                HandleChat(e);
+                return;
+            }
         }
         catch { }
+    }
+
+    private string BuildLogs()
+    {
+        var lines = new List<string>();
+        string? lastVisitId = null;
+
+        foreach (string entry in Logs)
+        {
+            string[] parts = entry.Split('\0', 4);
+            if (parts.Length < 4) continue;
+
+            string visitId = parts[0];
+            string roomLabel = parts[1];
+            string entryTimestamp = parts[2];
+            string log = parts[3];
+
+            if (visitId != lastVisitId)
+            {
+                if (lines.Count > 0)
+                {
+                    lines.Add("");
+                    lines.Add(new string('-', 78));
+                    lines.Add("");
+                }
+                lines.Add($"[{entryTimestamp}] Room: {roomLabel}");
+                lines.Add("");
+                lastVisitId = visitId;
+            }
+
+            lines.Add(log);
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    private void HandleChat(Intercept e)
+    {
+        string message = e.Packet.Read<string>();
+        if (message.Equals(":chestlogs", StringComparison.OrdinalIgnoreCase))
+        {
+            e.Block();
+            ext.Send(In.MOTDNotification, 1, Logs.Count == 0 ? "No chest logs yet." : BuildLogs());
+        }
     }
 
     private void ScheduleSend(long chestId)
@@ -199,6 +291,8 @@ public class Extension : GEarthExtension
         int diff = newCoins - oldCoins;
         CoinsCount[chestId] = newCoins;
         string action = diff > 0 ? "Added" : "Removed";
+        string logMsg = $"[Credits] [Chest {chestId}] - {action} {Math.Abs(diff)}c";
+        Log($"[CreditsChest {chestId}] - {action} {Math.Abs(diff)}c");
         ext.Send(In.NotificationDialog, "wired.error", 2,
             "message", $"[Chest {chestId}]\n\n{action} {Math.Abs(diff)}c",
             "image", "https://images.habbo.com/dcr/hof_furni/45508/CF_1_coin_bronze_icon.png");
@@ -322,6 +416,7 @@ public class Extension : GEarthExtension
                 ? $"https://images.habbo.com/dcr/hof_furni/{info.Revision}/{info.Identifier}_icon.png"
                 : "";
             string action = diff > 0 ? "Added" : "Removed";
+            Log($"[ItemsChest {chestId}] - {action} {Math.Abs(diff)}x {name}");
             ext.Send(In.NotificationDialog, "wired.error", 2,
                 "message", $"[Chest {chestId}]\n\n{action} [{Math.Abs(diff)}]\n\n{name}",
                 "image", image);
@@ -337,6 +432,7 @@ public class Extension : GEarthExtension
             string image = info is not null
                 ? $"https://images.habbo.com/dcr/hof_furni/{info.Revision}/{info.Identifier}_icon.png"
                 : "";
+            Log($"[ItemsChest {chestId}] - Removed {oldQty}x {name}");
             ext.Send(In.NotificationDialog, "wired.error", 2,
                 "message", $"[Chest {chestId}]\n\nRemoved [{oldQty}]\n\n{name}",
                 "image", image);
